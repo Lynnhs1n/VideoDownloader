@@ -11,15 +11,27 @@ Windows 桌面视频下载器，图形界面，基于 [yt-dlp](https://github.co
 - **Cookie**：自动加载同目录 `cookies.txt`，可判定是否含第一方登录态
 - **诊断**：启动即做环境自检，按影响排序给出阻塞点
 
-## 环境要求
+## 安装
 
-把下面三个文件放在**同一个文件夹**内：
+把下面三个文件下载到**同一个文件夹**内即可使用（本程序免安装，双击运行）。
 
-| 文件 | 说明 |
+### 1. 主程序
+
+| 文件 | 下载 |
 |---|---|
-| `VideoDownloader.exe` | 主程序（本仓库 Release 提供） |
-| `yt-dlp.exe` | 下载内核，需自行下载 |
-| `ffmpeg.exe` | 音视频合并，需自行下载 |
+| `VideoDownloader.exe` | **[Releases 页面 → v1.0.0](https://github.com/Lynnhs1n/VideoDownloader/releases/latest)** |
+
+### 2. 依赖（必须自备，本仓库不收录二进制）
+
+| 文件 | 直达下载链接 | 项目主页 |
+|---|---|---|
+| `yt-dlp.exe` | **[yt-dlp.exe 直链](https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe)** | https://github.com/yt-dlp/yt-dlp/releases/latest |
+| `ffmpeg.exe` | **[ffmpeg-master-latest-win64-gpl.zip](https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip)** | https://github.com/BtbN/FFmpeg-Builds/releases |
+
+> **FFmpeg 注意**：下载的 zip 解压后，需要的是 `bin/` 目录里的 **`ffmpeg.exe`** 这一个文件，
+> 把它单独拷到上面的文件夹即可。同目录的 `ffplay.exe`、`ffprobe.exe` 不是必需的。
+>
+> **yt-dlp 注意**：直链拿到的是 Windows 独立可执行文件，直接能用，无需安装 Python。
 
 `cookies.txt` 可选，放在同目录会被自动加载。
 
