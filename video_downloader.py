@@ -803,6 +803,8 @@ _PROCESS_TERMINATE = 0x0001
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _TH32CS_SNAPPROCESS = 0x00000002
+# GetExitCodeProcess 在进程尚未退出时返回这个值（WinBase.h: STILL_ACTIVE）
+_STILL_ACTIVE = 259
 _INVALID_HANDLE = -1
 _MAX_PATH = 260
 
@@ -849,6 +851,9 @@ if sys.platform == "win32":
             ctypes.POINTER(ctypes.c_uint32)]
         _kernel32.TerminateProcess.restype = ctypes.c_int
         _kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        _kernel32.GetExitCodeProcess.restype = ctypes.c_int
+        _kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p,
+                                                 ctypes.POINTER(ctypes.c_uint32)]
         # ---- ToolHelp32 进程快照 ----
         _kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
         _kernel32.CreateToolhelp32Snapshot.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
@@ -1054,9 +1059,16 @@ def _terminate_pid_native(pid: int, expect_name: str = YTDLP_EXE_NAME) -> str:
 
 
 def _pid_alive(pid: int) -> bool:
-    """该 PID 上是否仍有**任意**进程存在（只申请最低限度的查询权限）。
+    """该 PID 对应的进程是否**仍在运行**（注意：不是「进程对象是否还存在」）。
 
-    拿不到句柄即视为已不存在；平台不支持时返回 False（让等待立即结束，不拖慢流程）。
+    坑（实测踩过）：我们自己 Popen 出来的进程，被 TerminateProcess 杀掉之后，
+    只要手里还握着它的句柄，Windows 就不会销毁那个进程对象，此时 OpenProcess
+    依然成功——只凭 OpenProcess 判断会把「已被杀」误报成「还活着」，于是
+    _wait_pids_gone() 每次都要空转到超时（stop() 传 wait=2.0 ⇒ 白等 2 秒）。
+
+    正确判据是 GetExitCodeProcess：退出码仍是 STILL_ACTIVE(259) 才算还在跑。
+    拿不到句柄维持原有兜底行为（视为已不存在；平台不支持时同样返回 False，
+    让等待立即结束，不拖慢流程）。
     """
     if sys.platform != "win32" or _kernel32 is None:
         return False
@@ -1064,10 +1076,18 @@ def _pid_alive(pid: int) -> bool:
     if not handle:
         return False
     try:
-        _kernel32.CloseHandle(handle)
+        code = ctypes.c_uint32(_STILL_ACTIVE)
+        if _kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return int(code.value) == _STILL_ACTIVE
+        # 查不到退出码（极少见）→ 保守当作还在跑，宁可多等也不要漏判
+        return True
     except Exception:
-        pass
-    return True
+        return True
+    finally:
+        try:
+            _kernel32.CloseHandle(handle)
+        except Exception:
+            pass
 
 
 def _wait_pids_gone(pids: List[int], timeout: float = 2.0) -> None:
@@ -1478,39 +1498,89 @@ class DownloadEngine:
         10 次重试，同时管道永远不 EOF → _reader 不退出 → on_finished 永不回调
         → 界面一直卡在「下载中」，用户点「停止」同样失效。
 
-        但这里**不能**直接用 taskkill /F /T /PID：那是按 PID 杀整棵树，目标若已退出
-        且 PID 被系统复用，会误杀无关进程的整棵树。因此按四级递进终止：
-          1) Job Object（首选，按句柄归属，不做 PID 查找，约 0ms）；
-          2) ToolHelp32 查真实后代 → 逐个按**映像路径**校验后 TerminateProcess；
-          3) PowerShell CIM 查后代 → 按映像名校验后 Terminate；
-          4) 都不可用时才 taskkill /F /T，且回退前同样校验映像名；
-        最后仍保留 proc.terminate() 兜底，并起看门狗覆盖 Job 的挂载竞态。
+        但**不能**直接用 taskkill /F /T /PID：那是「按 PID 杀整棵树」，目标若已退出
+        且 PID 被系统复用，会误杀无关进程的整棵树。这里的策略是：
+          1) Job Object（首选）：Job 成员按**句柄**归属，终止时不经过任何 PID 查找，
+             因此天然没有 PID 复用误杀的可能，耗时约 0ms；
+          2) 精确进程树收尾：ToolHelp32 查真实后代 → 逐个按句柄查映像路径 →
+             名字对得上才 TerminateProcess；失败再走 CIM、再走带 IMAGENAME 过滤的
+             单 PID taskkill。**这三层都是按单个 PID 精确杀，没有一层按树杀**；
+          3) 只有全部精确手段都失败时才回退 taskkill /F /T，且回退前再核一次映像名；
+          4) 最后保留 proc.terminate() 兜底（它走的是句柄，同样安全）。
         """
         if not (self.proc and self.running):
             return
-        # 1) Job Object（首选）：一次调用终止整棵进程树，成员按句柄归属，
-        #    不做任何 PID 查找 → 不存在 PID 复用误杀的可能，且耗时约 0ms。
         killed_by_job = False
+        # 1) Job Object（首选）：一次调用终止 Job 内全部进程
         if sys.platform == "win32" and self.job:
-            killed_by_job = terminate_job_object(self.job)
-            if killed_by_job:
-                self.last_kill = {"killed": [self.proc.pid], "skipped": {},
-                                  "method": "job_object", "query_ok": True}
-        # 2) Job 不可用（如本机不支持/挂载失败）→ 精确查进程树 + 映像名校验后 kill
-        if not killed_by_job and sys.platform == "win32":
             try:
-                self.last_kill = kill_process_tree(self.proc.pid, YTDLP_EXE_NAME)
+                killed_by_job = terminate_job_object(self.job)
             except Exception:
-                self.last_kill = None
-        # 3) 兜底：非 Windows，或上面全部失败/跳过时，仍能杀掉直接子进程
+                killed_by_job = False
+        # 2) 精确收尾：
+        #    - Job 成功时不在这里同步扫一遍，Job 漏掉的后代交给下面第 4 步的看门狗
+        #      在 0.5s 后异步补杀（届时若管道已 EOF 就直接返回，正常路径零开销）。
+        #    - Job 失败时必须立刻同步扫，否则没人保证子进程会停。
+        #    - 注：早先这里同步扫会拖慢 ~1s，根因是 _pid_alive() 用 OpenProcess
+        #      判存活、对「已被杀但句柄未释放」的进程误报 True，导致 wait 空转。
+        #      该缺陷已修（改用 GetExitCodeProcess）。即便如此同步扫也仍然
+        #      只留给 Job 失败的兜底路径：Job 这条路径本身已经是精确且零 PID
+        #      查找的，没必要在正常路径上再付一次进程树扫描的开销。
+        precise = None
+        if sys.platform == "win32" and not killed_by_job:
+            try:
+                precise = kill_process_tree(self.proc.pid, YTDLP_EXE_NAME, wait=2.0)
+            except Exception:
+                precise = None
+        # 排障信息必须在**外层**记录：上面那个分支的进入条件是 not killed_by_job，
+        # 把 `if killed_by_job:` 写进去成了死代码，导致 Job 成功路径下 last_kill
+        # 恒为 None、_report_kill_result() 无内容可报。这里 Job 成功也记一笔。
+        if killed_by_job:
+            self.last_kill = {
+                "killed": [],
+                "skipped": {},
+                "method": "job_object",
+                "query_ok": True,
+            }
+        else:
+            self.last_kill = precise
+        # 3) 兜底：非 Windows，或上面全部失败/跳过时，仍能杀掉我们 Popen 出来的那一个
+        #    （Popen.terminate() 用的是句柄，不涉及 PID 查找，无复用风险）
         try:
             self.proc.terminate()
         except Exception:
             pass
-        # 4) 看门狗：Job 只覆盖「挂载之后」创建的子孙。万一 bootloader 抢先一步
-        #    已经起了子进程（理论上的竞态），管道就不会 EOF。这里 0.5s 后若仍在
-        #    运行，就补一次「查进程树 + 映像名校验」的精确 kill。
-        threading.Thread(target=self._terminate_watchdog, daemon=True).start()
+        # 4) 看门狗：Job 只覆盖「挂载之后创建」的后代。万一有进程赶在挂载窗口里
+        #    逃逸出去，管道就不会 EOF。0.5s 后若仍在运行就补一次精确 kill。
+        if sys.platform == "win32":
+            threading.Thread(target=self._terminate_watchdog, daemon=True).start()
+        # 5) 「为什么点了停止却没杀掉」必须在日志里说清楚，而不是静默
+        self._report_kill_result(self.last_kill)
+
+    def _report_kill_result(self, res) -> None:
+        """把进程树终止结果写进日志：「为什么点了停止却没杀掉」必须说清楚。"""
+        if not isinstance(res, dict):
+            return
+        for pid, reason in (res.get("skipped") or {}).items():
+            if str(reason).startswith("name_mismatch"):
+                actual = str(reason).split(":", 1)[-1] or "未知"
+                try:
+                    self.on_log(f"⚠ 终止下载进程时跳过 PID {pid}：该 PID 上已不是 "
+                                f"{YTDLP_EXE_NAME}（实际是 {actual}），疑似 PID 已被系统"
+                                f"复用；为避免误杀无关进程，已放弃本次终止。")
+                except Exception:
+                    pass
+                return
+        # 没有被拒绝下手的情况 → 报告这次是怎么终止的。
+        # Job 路径原先没有任何记录（last_kill 为 None），排障时只能抓瞎。
+        killed = res.get("killed") or []
+        method = res.get("method") or "unknown"
+        if killed:
+            try:
+                joined = ", ".join(str(p) for p in killed)
+                self.on_log(f"ℹ 已终止下载进程 PID {joined}（方式：{method}）。")
+            except Exception:
+                pass
 
     def _terminate_watchdog(self, grace: float = 0.5):
         """stop() 之后的兜底：仍在运行就补一次精确 kill（见 stop() 第 4 步）。"""
