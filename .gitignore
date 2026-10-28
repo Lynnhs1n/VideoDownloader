@@ -1,0 +1,15 @@
+# 白名单模式：默认忽略一切，只放行下面点名的文件。
+# 目的是杜绝误提交 —— 本目录下存在 cookies.txt（含 Google 登录会话）、
+# _chrome_backup_1027（含 Local State 加密密钥与 Cookie 库）、settings.json，
+# 以及体积巨大的 yt-dlp.exe / ffmpeg.exe 二进制。
+*
+
+# ---- 放行目录（git 需要能进入目录才能收录其内文件）----
+!_vd_cookie_ext/
+
+# ---- 放行文件 ----
+!.gitignore
+!README.md
+!video_downloader.py
+!test_p2_branch.py
+!_vd_cookie_ext/**

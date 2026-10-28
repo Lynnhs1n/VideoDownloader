@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "VD Cookie Exporter",
+  "version": "1.0",
+  "description": "Export YouTube/Google cookies to Netscape cookies.txt for VideoDownloader",
+  "permissions": ["cookies", "downloads"],
+  "host_permissions": [
+    "*://*.youtube.com/*",
+    "*://*.google.com/*",
+    "*://youtube.com/*",
+    "*://google.com/*"
+  ],
+  "background": {
+    "service_worker": "bg.js"
+  }
+}
