@@ -62,6 +62,21 @@ YouTube 对自动化下载有三层风控，需逐项排除：
 | 缺第一方登录 Cookie | 需含 `SID` / `HSID` / `SSID` 等 |
 | 未配置 PO Token | 在界面「PO Token」框填入 `web+<token>` |
 
+## 配套工具：微信视频格式转换器
+
+`WeChatVideoConverter.exe`（见 [Releases](https://github.com/Lynnhs1n/VideoDownloader/releases/latest)）—— 把视频转成微信可直接播放的格式，与主程序放同一目录即可（共用 ffmpeg.exe）。
+
+微信全场景仅稳定支持 **H.264 编码的 MP4**（H.265 兼容性差），本工具自动处理：
+
+- **智能判断**：先用 ffprobe（缺失时自动回退解析 ffmpeg 输出）探测编码；
+  已是 H.264 + AAC + yuv420p 就只**重封装 + faststart**（秒级完成、画质零损失），
+  其他编码（H.265 / VP9 / AV1 等）才真正转码
+- **硬性合规**：输出必定为 H.264 + yuv420p + AAC + faststart（moov 前置，边下边播）
+- **体积优化**：可设目标上限（如私聊 ≤1GB），超限自动降码率重压、同步压音频、必要时降分辨率
+- **安全**：输出为 `<原名>_wechat.mp4`，永不覆盖源文件；支持中文文件名
+
+微信体积限制参考：私聊单条 ≤1GB，朋友圈单条时长 ≤30 秒。
+
 ## 从源码构建
 
 需要 Python 3.12（系统默认的 3.13 无 tkinter）：
